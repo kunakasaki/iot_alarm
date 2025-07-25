@@ -1,66 +1,140 @@
-// api/notify.js (for Vercel Serverless)
+// api/notify.js - Fixed version for Vercel
+export default async function handler(req, res) {
+  // Enable CORS if needed
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-const https = require('https');
+  // Handle OPTIONS request
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
 
-module.exports = async (req, res) => {
-  const { deviceToken } = req.body;
+  // Only allow POST
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const { deviceToken, callerName, handle, callId } = req.body;
 
   if (!deviceToken) {
     return res.status(400).json({ error: 'Missing deviceToken in request body' });
   }
 
+  // Use provided values or defaults
   const payload = JSON.stringify({
     aps: {
-      alert: 'Hien Nguyen Call',
+      alert: `${callerName || 'Someone'} is calling...`,
     },
-    id: '265e73d3-bece-41e1-922e-3ae4dab34ba2',
-    nameCaller: 'Hien Nguyen',
-    handle: '0123456789',
-    isVideo: true,
+    id: callId || `call-${Date.now()}`,
+    nameCaller: callerName || 'Unknown Caller',
+    handle: handle || '0123456789',
+    isVideo: false,
   });
 
   try {
-    const certBuffer = Buffer.from(process.env.VOIP_CERT_PEM_BASE64, 'base64');
+    // Decode the certificate from base64
+    const certBase64 = process.env.VOIP_CERT_PEM_BASE64;
+    if (!certBase64) {
+      throw new Error('VOIP_CERT_PEM_BASE64 environment variable not set');
+    }
 
-    const options = {
-      hostname: 'api.development.push.apple.com',
-      port: 443,
-      path: `/3/device/${deviceToken}`,
-      method: 'POST',
-      headers: {
-        'apns-topic': 'com.francosebben.callkitexample.voip',
-        'apns-push-type': 'voip',
-        'apns-priority': '10',
-        'Content-Type': 'application/json',
-        'Content-Length': payload.length,
-      },
-      cert: certBuffer,
-      key: certBuffer,
-      passphrase: '9931', // same as used in your curl command
-    };
+    const certBuffer = Buffer.from(certBase64, 'base64');
+    const certString = certBuffer.toString('utf8');
 
-    const apnsRequest = https.request(options, (apnsResponse) => {
-      let responseData = '';
-      apnsResponse.on('data', (chunk) => {
-        responseData += chunk;
-      });
-      apnsResponse.on('end', () => {
-        res.status(apnsResponse.statusCode).json({
-          status: 'ok',
-          response: responseData,
+    // Log first few characters to verify cert format (remove in production)
+    console.log('Cert starts with:', certString.substring(0, 50));
+
+    // Import https at the top level for Vercel
+    const https = await import('https');
+
+    // Create the request
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'api.development.push.apple.com', // Use 'api.push.apple.com' for production
+        port: 443,
+        path: `/3/device/${deviceToken}`,
+        method: 'POST',
+        headers: {
+          'apns-topic': 'com.francosebben.callkitexample.voip',
+          'apns-push-type': 'voip',
+          'apns-priority': '10',
+          'apns-expiration': '0',
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        cert: certString,
+        key: certString,
+        passphrase: process.env.VOIP_CERT_PASSWORD || '9931',
+        rejectUnauthorized: true,
+      };
+
+      const request = https.request(options, (response) => {
+        let data = '';
+
+        response.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        response.on('end', () => {
+          console.log('APNS Status:', response.statusCode);
+          console.log('APNS Headers:', response.headers);
+
+          if (response.statusCode === 200) {
+            res.status(200).json({
+              success: true,
+              apnsId: response.headers['apns-id'],
+              message: 'VoIP push sent successfully',
+            });
+          } else {
+            // Parse error response
+            let errorData;
+            try {
+              errorData = JSON.parse(data);
+            } catch (e) {
+              errorData = { reason: data || 'Unknown error' };
+            }
+
+            res.status(response.statusCode).json({
+              success: false,
+              error: errorData.reason || 'Failed to send push',
+              statusCode: response.statusCode,
+              details: errorData,
+            });
+          }
+          resolve();
         });
       });
-    });
 
-    apnsRequest.on('error', (err) => {
-      console.error('APNs error:', err);
-      res.status(500).json({ error: err.message });
-    });
+      request.on('error', (error) => {
+        console.error('Request error:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message,
+          type: 'request_error',
+        });
+        resolve();
+      });
 
-    apnsRequest.write(payload);
-    apnsRequest.end();
-  } catch (err) {
-    console.error('Server error:', err);
-    res.status(500).json({ error: err.message });
+      // Set timeout
+      request.setTimeout(10000, () => {
+        request.destroy();
+        res.status(504).json({
+          success: false,
+          error: 'Request timeout',
+        });
+        resolve();
+      });
+
+      request.write(payload);
+      request.end();
+    });
+  } catch (error) {
+    console.error('Handler error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+      type: 'server_error',
+    });
   }
-};
+}
