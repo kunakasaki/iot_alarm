@@ -3,7 +3,11 @@
 const https = require('https');
 
 module.exports = async (req, res) => {
-  const deviceToken = '088fd7b5ebf0d736c85e7732ddd4148c9491c26d0626413b6cebf5ed153e02ab';
+  const { deviceToken } = req.body;
+
+  if (!deviceToken) {
+    return res.status(400).json({ error: 'Missing deviceToken in request body' });
+  }
 
   const payload = JSON.stringify({
     aps: {
