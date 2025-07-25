@@ -1,45 +1,62 @@
-import apn from "apn";
-import fs from "fs";
-import path from "path";
+// api/notify.js (for Vercel Serverless)
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Only POST allowed" });
-  }
+const https = require('https');
+
+module.exports = async (req, res) => {
+  const deviceToken = '088fd7b5ebf0d736c85e7732ddd4148c9491c26d0626413b6cebf5ed153e02ab';
+
+  const payload = JSON.stringify({
+    aps: {
+      alert: 'Hien Nguyen Call',
+    },
+    id: '265e73d3-bece-41e1-922e-3ae4dab34ba2',
+    nameCaller: 'Hien Nguyen',
+    handle: '0123456789',
+    isVideo: true,
+  });
 
   try {
-    const { deviceToken, alert, id, nameCaller, handle, isVideo } = req.body;
-
-    if (!deviceToken) return res.status(400).json({ error: "Missing deviceToken" });
-
-    const certPath = path.resolve("certificates/voip_certificate.pem");
+    const certBuffer = Buffer.from(process.env.VOIP_CERT_PEM_BASE64, 'base64');
 
     const options = {
-      cert: certPath,
-      key: certPath,
-      production: false, // set to true for production
+      hostname: 'api.development.push.apple.com',
+      port: 443,
+      path: `/3/device/${deviceToken}`,
+      method: 'POST',
+      headers: {
+        'apns-topic': 'com.francosebben.callkitexample.voip',
+        'apns-push-type': 'voip',
+        'apns-priority': '10',
+        'Content-Type': 'application/json',
+        'Content-Length': payload.length,
+      },
+      cert: certBuffer,
+      key: certBuffer,
+      passphrase: '9931', // same as used in your curl command
     };
 
-    const apnProvider = new apn.Provider(options);
+    const apnsRequest = https.request(options, (apnsResponse) => {
+      let responseData = '';
+      apnsResponse.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      apnsResponse.on('end', () => {
+        res.status(apnsResponse.statusCode).json({
+          status: 'ok',
+          response: responseData,
+        });
+      });
+    });
 
-    const notification = new apn.Notification();
-    notification.alert = alert || "Incoming call";
-    notification.payload = {
-      id,
-      nameCaller,
-      handle,
-      isVideo,
-    };
-    notification.topic = "com.your.bundleid.voip"; // <-- replace with your actual bundle ID
-    notification.pushType = "voip";
-    notification.priority = 10;
+    apnsRequest.on('error', (err) => {
+      console.error('APNs error:', err);
+      res.status(500).json({ error: err.message });
+    });
 
-    const result = await apnProvider.send(notification, deviceToken);
-    apnProvider.shutdown();
-
-    return res.status(200).json(result);
+    apnsRequest.write(payload);
+    apnsRequest.end();
   } catch (err) {
-    console.error("Push Error:", err);
-    return res.status(500).json({ error: "Push failed", detail: err.message });
+    console.error('Server error:', err);
+    res.status(500).json({ error: err.message });
   }
-}
+};
