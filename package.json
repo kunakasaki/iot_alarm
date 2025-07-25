@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "apn": "^2.2.0",
     "node-apn": "^3.0.0"
   }
 }
