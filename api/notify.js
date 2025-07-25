@@ -1,16 +1,15 @@
-// api/notify.js - Fixed version for Vercel
+import apn from 'apn';
+import fs from 'fs';
+
 export default async function handler(req, res) {
-  // Enable CORS if needed
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle OPTIONS request
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
-  // Only allow POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -18,119 +17,70 @@ export default async function handler(req, res) {
   const { deviceToken, callerName, handle, callId } = req.body;
 
   if (!deviceToken) {
-    return res.status(400).json({ error: 'Missing deviceToken in request body' });
+    return res.status(400).json({ error: 'Missing deviceToken' });
   }
 
-  // Use provided values or defaults
-  const payload = JSON.stringify({
-    aps: {
-      alert: `${callerName || 'Someone'} is calling...`,
-    },
-    id: callId || `call-${Date.now()}`,
-    nameCaller: callerName || 'Unknown Caller',
-    handle: handle || '0123456789',
-    isVideo: false,
-  });
-
   try {
-    // Decode the certificate from base64
     const certBase64 = process.env.VOIP_CERT_PEM_BASE64;
     if (!certBase64) {
-      throw new Error('VOIP_CERT_PEM_BASE64 environment variable not set');
+      throw new Error('VOIP_CERT_PEM_BASE64 not set');
     }
 
     const certBuffer = Buffer.from(certBase64, 'base64');
-    const certString = certBuffer.toString('utf8');
+    const certPath = '/tmp/voip_cert.pem';
+    fs.writeFileSync(certPath, certBuffer);
 
-    // Log first few characters to verify cert format (remove in production)
-    console.log('Cert starts with:', certString.substring(0, 50));
+    // Validate certificate format
+    const certContent = certBuffer.toString('utf8');
+    if (!certContent.includes('-----BEGIN CERTIFICATE-----')) {
+      throw new Error('Invalid certificate format: Missing -----BEGIN CERTIFICATE-----');
+    }
+    if (!certContent.includes('-----BEGIN PRIVATE KEY-----') && !certContent.includes('-----BEGIN RSA PRIVATE KEY-----')) {
+      throw new Error('Invalid certificate format: Missing -----BEGIN PRIVATE KEY----- or -----BEGIN RSA PRIVATE KEY-----');
+    }
 
-    // Import https at the top level for Vercel
-    const https = await import('https');
+    console.log('Cert length:', certContent.length);
+    console.log('Cert starts with:', certContent.substring(0, 50));
 
-    // Create the request
-    return new Promise((resolve, reject) => {
-      const options = {
-        hostname: 'api.development.push.apple.com', // Use 'api.push.apple.com' for production
-        port: 443,
-        path: `/3/device/${deviceToken}`,
-        method: 'POST',
-        headers: {
-          'apns-topic': 'com.francosebben.callkitexample.voip',
-          'apns-push-type': 'voip',
-          'apns-priority': '10',
-          'apns-expiration': '0',
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-        cert: certString,
-        key: certString,
-        passphrase: process.env.VOIP_CERT_PASSWORD || '9931',
-        rejectUnauthorized: true,
-      };
+    const provider = new apn.Provider({
+      cert: certPath,
+      key: certPath,
+      passphrase: process.env.VOIP_CERT_PASSWORD || '9931',
+      production: false,
+    });
 
-      const request = https.request(options, (response) => {
-        let data = '';
+    const notification = new apn.Notification();
+    notification.topic = 'com.francosebben.callkitexample.voip';
+    notification.pushType = 'voip';
+    notification.priority = 10;
+    notification.payload = {
+      aps: { alert: `${callerName || 'Someone'} is calling...` },
+      id: callId || `call-${Date.now()}`,
+      nameCaller: callerName || 'Unknown Caller',
+      handle: handle || '0123456789',
+      isVideo: false,
+    };
 
-        response.on('data', (chunk) => {
-          data += chunk;
-        });
+    console.log('Sending APNs payload:', notification.payload);
 
-        response.on('end', () => {
-          console.log('APNS Status:', response.statusCode);
-          console.log('APNS Headers:', response.headers);
+    const result = await provider.send(notification, deviceToken);
+    console.log('APNs result:', result);
 
-          if (response.statusCode === 200) {
-            res.status(200).json({
-              success: true,
-              apnsId: response.headers['apns-id'],
-              message: 'VoIP push sent successfully',
-            });
-          } else {
-            // Parse error response
-            let errorData;
-            try {
-              errorData = JSON.parse(data);
-            } catch (e) {
-              errorData = { reason: data || 'Unknown error' };
-            }
-
-            res.status(response.statusCode).json({
-              success: false,
-              error: errorData.reason || 'Failed to send push',
-              statusCode: response.statusCode,
-              details: errorData,
-            });
-          }
-          resolve();
-        });
+    if (result.failed.length > 0) {
+      return res.status(500).json({
+        success: false,
+        error: result.failed[0].response.reason,
+        statusCode: result.failed[0].status,
       });
+    }
 
-      request.on('error', (error) => {
-        console.error('Request error:', error);
-        res.status(500).json({
-          success: false,
-          error: error.message,
-          type: 'request_error',
-        });
-        resolve();
-      });
-
-      // Set timeout
-      request.setTimeout(10000, () => {
-        request.destroy();
-        res.status(504).json({
-          success: false,
-          error: 'Request timeout',
-        });
-        resolve();
-      });
-
-      request.write(payload);
-      request.end();
+    res.status(200).json({
+      success: true,
+      apnsId: result.sent[0]?.device,
+      message: 'VoIP push sent successfully',
     });
   } catch (error) {
-    console.error('Handler error:', error);
+    console.error('Handler error:', error.message, error.stack);
     return res.status(500).json({
       success: false,
       error: error.message,
