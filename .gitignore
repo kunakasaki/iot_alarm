@@ -1,3 +1,7 @@
 certificates/
 node_modules/
+<<<<<<< HEAD
 .DS_Store
+=======
+src/certificates/
+>>>>>>> f5e3d2494560e018a7ff29ac241b534769d6f2b9
